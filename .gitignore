@@ -1,0 +1,15 @@
+# Downloaded, not authored -- 1.9GB between them
+.venv/
+models/
+_setup/OllamaSetup.exe
+_setup/pretest-*
+ollama-models/
+
+# Miso's own life. Her drives, her needs, and the record of everywhere she has
+# looked are hers and yours, not the repository's.
+state/
+logs/
+PAUSE
+
+__pycache__/
+*.pyc
