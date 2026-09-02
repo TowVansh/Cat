@@ -70,6 +70,21 @@ class Miso:
         self._turn_times.append(time.time())
         self._last_act = time.time()
 
+    def _rest(self, seconds: float) -> None:
+        """Wait out the rest of the tick, but wake the instant you say something.
+
+        The heartbeat only wants to think every thirty seconds. Sleeping the
+        whole thirty means anything typed sits in the queue until the next one,
+        so she could take half a minute to notice a word -- which reads as her
+        being broken, not thoughtful. Polling for a new arrival costs nothing
+        and brings that down to a tenth of a second.
+        """
+        deadline = time.time() + seconds
+        while not self._stop.is_set() and time.time() < deadline:
+            if not self.inbox.empty():
+                return
+            self._stop.wait(0.1)
+
     def _vision_ok(self) -> bool:
         now = time.time()
         self._vision_times = [t for t in self._vision_times if now - t < 3600]
@@ -232,7 +247,7 @@ class Miso:
 
         while not self._stop.is_set():
             if senses.paused():
-                time.sleep(TICK_SECONDS)
+                self._rest(TICK_SECONDS)
                 continue
 
             # anything said to Miso jumps the queue
@@ -254,13 +269,13 @@ class Miso:
             if self.watcher.fed_up(self.drives):
                 self._nag()
                 self.drives.save()
-                self._stop.wait(TICK_SECONDS)
+                self._rest(TICK_SECONDS)
                 continue
             self.watcher.save()
 
             if time.time() < self._asleep_until:
                 self.drives.save()
-                self._stop.wait(TICK_SECONDS)
+                self._rest(TICK_SECONDS)
                 continue
 
             urge = self.drives.urge()
@@ -269,13 +284,13 @@ class Miso:
                 if senses.part_of_day() == "night":
                     self._dream()
                 self.drives.save()
-                self._stop.wait(TICK_SECONDS)
+                self._rest(TICK_SECONDS)
                 continue
 
             quiet_enough = time.time() - self._last_act > MIN_GAP_BETWEEN_ACTS
             if urge == "idle" or not quiet_enough or not self._rate_ok():
                 self.drives.save()
-                self._stop.wait(TICK_SECONDS)
+                self._rest(TICK_SECONDS)
                 continue
 
             # do not go hunting for someone who is not there
@@ -290,4 +305,4 @@ class Miso:
 
             self._act(urge)
             self.drives.save()
-            self._stop.wait(TICK_SECONDS)
+            self._rest(TICK_SECONDS)
