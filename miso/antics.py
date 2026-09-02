@@ -28,6 +28,9 @@ FAR_SCALE = 0.55          # at the back of the room
 CHASE_SPEED = 430.0
 WANDER_SPEED = 120.0
 POUNCE_CROUCH = 0.45      # seconds spent wiggling before a leap
+HOP_CROUCH = 0.16         # a hop is smaller than a pounce, so the wind-up is
+                          # shorter -- but a jump with zero anticipation at
+                          # all reads as a teleport, not a leap
 
 # how long each antic lasts before Miso gets bored of it
 DURATIONS = {
@@ -48,7 +51,9 @@ POSE_FOR = {
 }
 
 IDLE_PICKS = ["sit", "groom", "wander", "stretch", "wander", "watch", "flop"]
-PLAYFUL_PICKS = ["zoomies", "spin", "pounce", "hop", "wander", "chase"]
+# "hop" used to be in here, which made her jump constantly -- it's a real but
+# rare bit of body language now, not a coin-flip filler between other antics
+PLAYFUL_PICKS = ["zoomies", "spin", "pounce", "wander", "chase"]
 
 DURATIONS["going_home"] = (6.0, 14.0)
 POSE_FOR["going_home"] = "walk"
@@ -108,6 +113,8 @@ class Antics:
         self.target = target
         if antic == "pounce":
             self.crouch_until = time.time() + POUNCE_CROUCH
+        if antic == "hop":
+            self.crouch_until = time.time() + HOP_CROUCH
         if antic == "spin":
             self.spin = 0.0
         if antic in ("wander", "zoomies") and target is None:
@@ -191,7 +198,7 @@ class Antics:
                                               self.screen.right() - self.w - 10),
                                random.uniform(self.back, self.floor))
             self._steer_to(*self.target, CHASE_SPEED * 1.15, dt)
-            if self.vy == 0.0 and random.random() < 0.03:
+            if self.vy == 0.0 and random.random() < 0.012:
                 self.vy = -520.0                     # little skips as she runs
 
         elif a == "going_home":
@@ -205,11 +212,17 @@ class Antics:
                 self._steer_to(*self.target, WANDER_SPEED, dt)
 
         elif a == "spin":
-            self.spin += dt * 900
+            # a happy shimmy, not a coin spinning on a table -- real cats
+            # don't rotate their whole body through 360 degrees, and a flat
+            # sprite doing that at 900deg/s is exactly what read as fake
+            self.spin = math.sin(now * 8) * 25
             self.vx *= 0.85
 
         elif a == "hop":
-            if self.vy == 0.0:
+            if now < self.crouch_until:
+                self.vx *= 0.7                       # a beat to gather first
+                self.lean = math.sin(now * 30) * 4
+            elif self.vy == 0.0:
                 self.vy = -720.0
 
         elif a in ("sit", "groom", "flop", "settle", "watch", "perk",
@@ -222,7 +235,7 @@ class Antics:
 
         if a != "spin":
             self.spin *= 0.86
-        if a not in ("wiggle", "pounce"):
+        if a not in ("wiggle", "pounce", "hop"):
             self.lean *= 0.88
 
     def _steer_to(self, tx: float, ty: float, speed: float, dt: float) -> None:

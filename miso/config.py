@@ -62,6 +62,15 @@ WALLED_SUFFIXES = {
     ".lnk", ".url", ".bat", ".cmd", ".ps1",
 }
 
+# Window titles that feel like a wall even though she's allowed to glance at
+# the screen in general -- her own equivalent of WALLED_NAMES for the one
+# sense that isn't filesystem-shaped. Empty this set for no restriction.
+WALLED_WINDOW_KEYWORDS = {
+    "password", "1password", "bitwarden", "keepass", "lastpass", "nordpass",
+    "bank", "banking", "paypal", "venmo", "chase", "wells fargo",
+    "coinbase", "binance", "metamask", "wallet", "kraken",
+}
+
 MAX_READ_CHARS = 40_000        # Miso cannot swallow a whole novel at once
 MAX_LOOK_ENTRIES = 200         # a crowded room is overwhelming
 MAX_WRITE_CHARS = 100_000

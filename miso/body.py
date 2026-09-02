@@ -11,11 +11,14 @@ import threading
 import time
 from datetime import date
 
-from . import brain, config, drives as drives_mod, memory, mind, reflex, senses
+from . import brain, config, drives as drives_mod, eyes, memory, mind, reflex, senses
 
 TICK_SECONDS = 30
 MIN_GAP_BETWEEN_ACTS = 150      # seconds of quiet between unprompted moments
 MAX_TURNS_PER_HOUR = 24         # hard ceiling, cannot spiral
+
+MIN_GAP_BETWEEN_VISION = 1200   # 20 minutes -- a glance is far heavier than a turn
+MAX_VISION_PER_HOUR = 3         # its own, tighter ceiling
 
 OCCASIONS = {
     "explore": "nobody is about. you want to go and look at something. pick a "
@@ -28,6 +31,7 @@ OCCASIONS = {
     "rest": "you are tired. settle somewhere. maybe say one sleepy thing, maybe not.",
     "sleep": "you are asleep.",
     "idle": "nothing in particular. you are just here.",
+    "look_at_screen": "you glance at whatever is open on the screen in front of you.",
 }
 
 
@@ -42,6 +46,7 @@ class Miso:
         self._stop = threading.Event()
         self._last_act = 0.0
         self._turn_times: list[float] = []
+        self._vision_times: list[float] = []
         self._asleep_until = 0.0
         self._last_dream = ""
 
@@ -61,6 +66,14 @@ class Miso:
     def _spend_turn(self) -> None:
         self._turn_times.append(time.time())
         self._last_act = time.time()
+
+    def _vision_ok(self) -> bool:
+        now = time.time()
+        self._vision_times = [t for t in self._vision_times if now - t < 3600]
+        if len(self._vision_times) >= MAX_VISION_PER_HOUR:
+            return False
+        last = self._vision_times[-1] if self._vision_times else 0.0
+        return now - last > MIN_GAP_BETWEEN_VISION
 
     # ---------------------------------------------------------------- life
 
@@ -89,8 +102,41 @@ class Miso:
         self.drives.satisfy(loneliness=-0.25, boredom=-0.15)
         self._spend_turn()
 
+    def _glance(self) -> str | None:
+        """Look at whatever window has focus. Returns an occasion string
+        describing it, or None if there was nothing to see, it was walled,
+        or the vision model couldn't be reached -- any of which just means
+        this tick falls back to a normal occasion instead."""
+        fg = eyes.foreground_window()
+        if fg is None:
+            return None
+        _, title = fg
+        if eyes.is_walled_title(title):
+            return None
+
+        image = eyes.capture_foreground()
+        if image is None:
+            return None
+
+        try:
+            description = brain.see(
+                image, "describe what's on this screen in a couple of plain sentences.")
+        except brain.BrainOffline:
+            return None
+        if not description:
+            return None
+
+        self._vision_times.append(time.time())
+        memory.remember("saw", f"{title}: {description}")
+        self.drives.spend(0.05)
+        self.drives.satisfy(curiosity=-0.20)
+        return f"you glance at the screen. it says: {title}\n\nwhat's on it: {description}"
+
     def _act(self, occasion_key: str, heard: str | None = None) -> None:
-        occasion = OCCASIONS.get(occasion_key, OCCASIONS["idle"])
+        if occasion_key == "look_at_screen":
+            occasion = self._glance() or OCCASIONS["explore"]
+        else:
+            occasion = OCCASIONS.get(occasion_key, OCCASIONS["idle"])
         # whatever Miso is doing on its own stops the moment you say something
         stop_for_you = None if heard else (lambda: not self.inbox.empty())
         try:
@@ -194,6 +240,12 @@ class Miso:
             # do not go hunting for someone who is not there
             if urge == "find_you" and not senses.someone_is_there():
                 urge = "explore" if self.drives.curiosity > self.drives.boredom else "potter"
+
+            # a rare special case of curiosity: glance at the screen instead
+            # of the filesystem. Gated on its own, much stingier cooldown --
+            # a vision call is far more expensive than a text turn.
+            if urge == "explore" and self._vision_ok():
+                urge = "look_at_screen"
 
             self._act(urge)
             self.drives.save()

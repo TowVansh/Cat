@@ -1,36 +1,64 @@
 """Miso's body.
 
-The cat is drawn, not loaded -- every part of it is vector shapes on a canvas.
-That means no sprite sheet to fall out of sync, expressions that interpolate
-instead of snapping between frames, and a pose that can be driven straight from
-the drives: a bored Miso really does hold its ears differently from a curious
-one.
+The cat is pixel art: a handful of hand-authored frames per action
+(miso/assets/pixel/<skin>/), swapped rather than smoothly deformed, the way
+sprite-based desktop pets have always worked. Idle blinks, walking cycles a
+4-frame bounce synced to the same step clock that drives the tail sway, and
+sleep breathes slowly. Mood (curious/happy/lonely/bored) doesn't have its own
+pose yet -- that's a later pass -- so it currently falls back to idle.
 
-Poses are not switched, they are eased toward. Every visible quantity (ear
-angle, eye openness, tail speed, squash) is a number that chases a target, so
-the cat is never caught in a hard cut.
+Each skin (SKINS) is the same frame set redrawn in a different palette --
+cream tabby, orange tabby, gray mackerel, tuxedo -- picked via Cat.set_skin()
+or the right-click menu. The frames themselves are generated, not hand-drawn
+-- see tools/pixelcat/generate.py to rebuild or add one.
 """
 from __future__ import annotations
 
 import math
 import random
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QLinearGradient,
-                           QPainter, QPainterPath, QPen, QPolygonF)
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPainterPath,
+                           QPen, QPixmap, QPolygonF, QTransform)
 from PySide6.QtWidgets import QLineEdit, QMenu, QWidget
+
+ASSET_DIR = Path(__file__).resolve().parent / "assets" / "pixel"
+SPRITE_TARGET_H = 128.0   # the cat's height on screen, paws to ear tip
+
+WALK_FRAMES = ["walk_0", "walk_1", "walk_2", "walk_3"]
+STEP_PER_FRAME = 0.6      # how much self._step advances between walk frames
+
+MOOD_FRAMES = {
+    "curious": "mood_curious", "happy": "mood_happy",
+    "lonely": "mood_lonely", "bored": "mood_bored",
+}
+TALK_HZ = 4.5              # mouth-flap rate while a line is on screen --
+                            # fixed-cadence, not real audio amplitude; see
+                            # tools/pixelcat/generate.py's docstring
+
+DEFAULT_SKIN = "cream_tabby"
+SKINS = ["cream_tabby", "orange_tabby", "gray_mackerel", "tuxedo"]
+
+_sprite_cache: dict[str, QPixmap] = {}
+
+
+def _sprite(skin: str, name: str, flipped: bool) -> QPixmap:
+    """Load once and cache; a QPixmap needs a QApplication to exist, so this
+    is lazy rather than a module-level constant."""
+    key = f"{skin}/{name}:{'L' if flipped else 'R'}"
+    pm = _sprite_cache.get(key)
+    if pm is None:
+        pm = QPixmap(str(ASSET_DIR / skin / f"{name}.png"))
+        if flipped:
+            pm = pm.transformed(QTransform().scale(-1, 1))
+        _sprite_cache[key] = pm
+    return pm
 
 # ----------------------------------------------------------------- palette
 
-CREAM = QColor("#F7E9D7")
-CREAM_SHADE = QColor("#E8D5BC")
-TAN = QColor("#D6A279")
 TAN_DARK = QColor("#B9835B")
-INK = QColor("#4A3A30")
-PINK = QColor("#F0AFB4")
-BLUSH = QColor(240, 150, 160, 90)
-WHITE = QColor("#FFFFFF")
 
 BUBBLE_BG = QColor(255, 253, 249, 246)
 BUBBLE_LINE = QColor("#4A3A30")
@@ -104,9 +132,31 @@ class Cat(QWidget):
         self._step = 0.0
         self._walking = False
         self._facing = 1
+        self.skin = DEFAULT_SKIN
+        self.ground_speed = 0.0     # px/s, driven by Antics -- how fast the
+                                     # walk-frame cycle advances, so a chase
+                                     # visibly runs and a wander just walks
         self.depth_scale = 1.0      # perspective, driven by Antics
         self.spin = 0.0             # tail-chasing
         self.lean = 0.0             # body lean into a movement
+
+        # held: picked up. Legs dangle (the held_0/held_1 frames), and she
+        # swings like an actually-lifted cat -- a pendulum lag behind your
+        # hand's motion, not a rubber-band stretch. Shaking still wobbles.
+        self.held = False
+        self.hold_sway = 0.0
+        self._hold_sway_target = 0.0
+        self._wobble_until = 0.0
+
+        # jumping: stretched while flying, briefly squashed on landing --
+        # same idea as the drag stretch, driven by Antics instead
+        self.airborne = False
+        self.air_stretch = 0.0
+        self._air_stretch_target = 0.0
+        self._land_squash_until = 0.0
+
+        # off by default: she only watches the cursor once you ask her to
+        self.eye_follow_enabled = False
 
         # speech
         self._line = ""
@@ -145,6 +195,53 @@ class Cat(QWidget):
             self._pose_name = name
             self._target = dict(POSES[name])
             self._walking = name == "walk"
+
+    def set_skin(self, name: str) -> None:
+        if name in SKINS and name != self.skin:
+            self.skin = name
+            self.update()
+
+    def set_held(self, held: bool) -> None:
+        self.held = held
+        if not held:
+            self._hold_sway_target = 0.0
+
+    def set_hold_sway(self, degrees: float) -> None:
+        """A pendulum lag angle while held, reported fresh every mouse move
+        and eased here -- same shape as set_air_stretch, different cause."""
+        self._hold_sway_target = max(-30.0, min(30.0, degrees))
+
+    def trigger_wobble(self) -> None:
+        """Shaken while held: a short side-to-side wobble, decaying on its
+        own rather than needing anyone to turn it back off."""
+        self._wobble_until = time.time() + 0.9
+
+    def set_gaze_from_global(self, dx: float, dy: float, radius: float = 260.0) -> None:
+        """dx, dy: cursor position minus roughly where her head is on
+        screen. A local hover alone isn't enough for a desktop pet -- she
+        should track the cursor from anywhere, not just when it's already
+        over her tiny window. No-op unless eye_follow_enabled -- off by
+        default, since watching the cursor everywhere is a thing you opt
+        into, not something she just does at you."""
+        if not self.eye_follow_enabled:
+            return
+        nx = max(-1.0, min(1.0, dx / radius))
+        ny = max(-1.0, min(1.0, dy / radius))
+        self._gaze_target = QPointF(nx * 3.4, ny * 2.6)
+
+    def set_eye_follow(self, enabled: bool) -> None:
+        self.eye_follow_enabled = enabled
+        if not enabled:
+            self._gaze_target = QPointF(0, 0)
+
+    def set_air_stretch(self, v: float) -> None:
+        """0 = normal, 1 = fully stretched -- eased in _frame, driven by how
+        fast she's moving vertically while airborne."""
+        self._air_stretch_target = max(0.0, min(1.0, v))
+
+    def trigger_land_squash(self) -> None:
+        """A hard landing: brief squash, decaying on its own."""
+        self._land_squash_until = time.time() + 0.22
 
     def speak(self, text: str, kind: str = "say") -> None:
         """Queue a line. Lines wait their turn instead of replacing each other --
@@ -208,8 +305,16 @@ class Cat(QWidget):
         self._gaze.setX(lerp(self._gaze.x(), self._gaze_target.x(), 0.12))
         self._gaze.setY(lerp(self._gaze.y(), self._gaze_target.y(), 0.12))
 
+        # both chase their target the same way; released, the target drops
+        # to 0 and she settles back to normal on her own
+        self.hold_sway = lerp(self.hold_sway, self._hold_sway_target, 0.16)
+        self.air_stretch = lerp(self.air_stretch, self._air_stretch_target, 0.25)
+
         if self._walking:
-            self._step += 0.18
+            # tied to actual ground speed, not a fixed rate -- otherwise a
+            # 430px/s chase and a 120px/s wander cycle their legs identically
+            # and she reads as sliding rather than running or walking
+            self._step += max(0.035, abs(self.ground_speed) * 0.00075)
 
         # reveal speech one character at a time
         if self._line:
@@ -275,7 +380,6 @@ class Cat(QWidget):
             p.rotate(self.lean)
         p.translate(-CX, -GROUND)
 
-        self._draw_shadow(p, t)
         self._draw_cat(p, t)
         p.restore()
 
@@ -284,209 +388,100 @@ class Cat(QWidget):
         if self._bubble_a > 0.02:
             self._draw_bubble(p)
 
-    # ---- shadow
-
-    def _draw_shadow(self, p: QPainter, t: float) -> None:
-        breathe = math.sin(t * 1.7) * 0.02
-        w = 116 * (1 + breathe)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(60, 45, 38, 46))
-        p.drawEllipse(QRectF(CX - w / 2, GROUND - 9, w, 18))
-
     # ---- the cat itself
 
-    def _draw_cat(self, p: QPainter, t: float) -> None:
-        pr = self._p
-        breathe = math.sin(t * 1.7) * 0.022
-        squash = pr["squash"]
-        bob = math.sin(self._step * 2) * 3.0 if self._walking else 0.0
-
-        p.save()
-        p.translate(CX, GROUND + bob)
-
-        body_h = 84 * (1 - squash + breathe)
-        body_w = 98 * (1 + pr["wide"] + squash * 0.35)
-        head_y = -(body_h + 44) + 16 + pr["drop"]
-
-        self._draw_tail(p, t, body_h)
+    def _frame_name(self, t: float) -> str:
+        """Which pixel frame is current -- driven by the same step/blink
+        clocks _frame() already advances, so it needs no animation state of
+        its own."""
+        if self.held:
+            return "held_0" if math.sin(t * 2.2) > 0 else "held_1"
+        if self.airborne:
+            return "jump_0"
+        if self._pose_name == "sleep":
+            return "sleep_0" if math.sin(t * 0.6) > 0 else "sleep_1"
         if self._walking:
-            self._draw_legs(p)
+            i = int(self._step / STEP_PER_FRAME) % len(WALK_FRAMES)
+            return WALK_FRAMES[i]
+        if self._line:
+            # mouth flaps while there's an actual line on screen -- tied to
+            # her real speaking state, just not real audio amplitude yet
+            return "talk_1" if math.sin(t * TALK_HZ * 2 * math.pi) > 0 else "talk_0"
+        if self._pose_name in MOOD_FRAMES:
+            return MOOD_FRAMES[self._pose_name]
+        return "idle_1" if self._blink > 0.4 else "idle_0"
 
-        # body
-        outline = QPen(INK, 3.2)
-        outline.setJoinStyle(Qt.RoundJoin)
-        grad = QLinearGradient(0, -body_h, 0, 0)
-        grad.setColorAt(0.0, CREAM)
-        grad.setColorAt(1.0, CREAM_SHADE)
-        p.setPen(outline)
-        p.setBrush(QBrush(grad))
-        body = QRectF(-body_w / 2, -body_h, body_w, body_h * 1.06)
-        path = QPainterPath()
-        path.addRoundedRect(body, body_w * 0.5, body_h * 0.62)
-        p.drawPath(path)
+    def _draw_cat(self, p: QPainter, t: float) -> None:
+        frame_name = self._frame_name(t)
+        flipped = self._facing < 0
+        sprite = _sprite(self.skin, frame_name, flipped=flipped)
+        if sprite.isNull():
+            return
 
-        # front paws
-        p.setBrush(TAN)
-        for sx in (-1, 1):
-            p.drawEllipse(QRectF(sx * 9 - 15, -15, 30, 15))
+        # pixel art wants nearest-neighbor scaling, not the smooth filter
+        # used everywhere else, or the crisp block edges turn to mush
+        p.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        p.setRenderHint(QPainter.Antialiasing, False)
 
-        # chest patch
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 70))
-        p.drawEllipse(QRectF(-17, -body_h * 0.62, 34, body_h * 0.44))
+        s = SPRITE_TARGET_H / sprite.height()
+        w, h = sprite.width() * s, sprite.height() * s
 
-        self._draw_head(p, t, head_y)
-        p.restore()
+        now = time.time()
+        wobble, jitter_sway = 0.0, 0.0
+        remaining = self._wobble_until - now
+        if remaining > 0:
+            # eased decay (not linear) so it settles instead of cutting off
+            # abruptly, and slow enough to read as a wobble, not a buzz
+            decay = (remaining / 0.9) ** 1.6
+            wobble = math.sin(now * 9.5) * 16 * decay
+            jitter_sway = math.sin(now * 9.5 + 1.2) * 5 * decay
 
-    def _draw_legs(self, p: QPainter) -> None:
-        p.setPen(QPen(INK, 3.0))
-        p.setBrush(TAN)
-        for i, sx in enumerate((-1, 1)):
-            swing = math.sin(self._step + i * math.pi) * 7
-            p.drawEllipse(QRectF(sx * 26 - 12 + swing, -14, 24, 14))
+        # a shake-wobble and the steady hold-sway are different things (a
+        # brief startled shake vs. a continuous pendulum lag) but both are
+        # just a rotation, so they add rather than needing separate states
+        rotation = wobble + self.hold_sway
 
-    def _draw_tail(self, p: QPainter, t: float, body_h: float) -> None:
-        pr = self._p
-        sway = math.sin(t * 1.6 * max(0.2, pr["tail"])) * (9 + 7 * pr["tail"])
-        up = pr["tailup"]
-        f = self._facing
+        # normally she pivots at her paws (standing on the ground). Held,
+        # that would swing her like an upside-down pendulum -- wrong end.
+        # She should hang and swing from about where a hand would actually
+        # grip her, near the shoulders, so the pivot moves up near the top
+        # of the sprite and the body dangles below it.
+        pivot_y = -h * 0.72 if self.held else 0.0
 
-        # a long S from behind the hip, curling up beside the body
-        start = QPointF(f * 30, -body_h * 0.20)
-        c1 = QPointF(f * (72 + sway * 0.3), -body_h * (0.16 + 0.10 * up))
-        c2 = QPointF(f * (98 + sway * 0.9), -body_h * (0.78 + 0.62 * up))
-        end = QPointF(f * (70 + sway * 1.3), -body_h * (1.18 + 0.86 * up))
-
-        path = QPainterPath(start)
-        path.cubicTo(c1, c2, end)
-
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(INK, 15, Qt.SolidLine, Qt.RoundCap))
-        p.drawPath(path)
-        p.setPen(QPen(CREAM, 9.5, Qt.SolidLine, Qt.RoundCap))
-        p.drawPath(path)
-
-        # tan tip, drawn as the last stretch of the same curve
-        tip = QPainterPath(path.pointAtPercent(0.70))
-        tip.quadTo(path.pointAtPercent(0.86), end)
-        p.setPen(QPen(INK, 15, Qt.SolidLine, Qt.RoundCap))
-        p.drawPath(tip)
-        p.setPen(QPen(TAN, 9.5, Qt.SolidLine, Qt.RoundCap))
-        p.drawPath(tip)
-
-    def _draw_head(self, p: QPainter, t: float, head_y: float) -> None:
-        pr = self._p
         p.save()
-        p.translate(0, head_y)
-        p.rotate(pr["tilt"] + math.sin(t * 0.8) * 1.2)
+        p.translate(CX + jitter_sway, GROUND + pivot_y)
+        if abs(rotation) > 0.05:
+            p.rotate(rotation)
 
-        r = 47.0
-        self._draw_ears(p, r)
+        # the mid-air stretch is anchored at the paws so she stretches up
+        # rather than out; landing briefly overrides it with a squash
+        # instead, the classic cartoon-physics pair. Not applied while held
+        # -- the pivot has already moved, and dangling has its own frame.
+        stretch = 0.0 if self.held else self.air_stretch
+        land = 0.0
+        land_remaining = self._land_squash_until - now
+        if land_remaining > 0 and not self.held:
+            land = land_remaining / 0.22
+        scale_x = 1.0 - stretch * 0.28 + land * 0.32
+        scale_y = 1.0 + stretch * 0.55 - land * 0.42
+        if abs(scale_x - 1.0) > 0.001 or abs(scale_y - 1.0) > 0.001:
+            p.scale(scale_x, scale_y)
 
-        p.setPen(QPen(INK, 3.2))
-        grad = QLinearGradient(0, -r, 0, r)
-        grad.setColorAt(0.0, CREAM)
-        grad.setColorAt(1.0, CREAM_SHADE)
-        p.setBrush(QBrush(grad))
-        p.drawEllipse(QRectF(-r, -r * 0.94, r * 2, r * 1.88))
+        top = -h - pivot_y
+        p.drawPixmap(QRectF(-w / 2, top, w, h), sprite, QRectF(sprite.rect()))
 
-        # blush
-        if pr["blush"] > 0.05:
-            p.setPen(Qt.NoPen)
-            c = QColor(BLUSH)
-            c.setAlpha(int(90 * pr["blush"]))
-            p.setBrush(c)
-            for sx in (-1, 1):
-                p.drawEllipse(QRectF(sx * 30 - 11, 4, 22, 13))
+        # idle_0 has blank eye sockets; composite the iris on top, offset
+        # by the live gaze, so she can track the cursor
+        if frame_name == "idle_0":
+            eyes = _sprite(self.skin, "eyes", flipped=flipped)
+            if not eyes.isNull():
+                gx = max(-1.4, min(1.4, self._gaze.x() / 2.4)) * s
+                gy = max(-1.0, min(1.0, self._gaze.y() / 2.0)) * s
+                p.drawPixmap(QRectF(-w / 2 + gx, top + gy, w, h), eyes, QRectF(eyes.rect()))
 
-        self._draw_eyes(p)
-        self._draw_muzzle(p)
         p.restore()
 
-    def _draw_ears(self, p: QPainter, r: float) -> None:
-        pr = self._p
-        p.setPen(QPen(INK, 3.2))
-        for sx in (-1, 1):
-            p.save()
-            p.translate(sx * r * 0.62, -r * 0.62)
-            twitch = self._twitch * 10 * (1 if sx > 0 else -1)
-            p.rotate(sx * (26 - pr["ear"] * 22) + twitch)
-            outer = QPolygonF([QPointF(-19, 6), QPointF(0, -34), QPointF(19, 6)])
-            p.setBrush(CREAM)
-            p.drawPolygon(outer)
-            p.setPen(Qt.NoPen)
-            p.setBrush(PINK)
-            p.drawPolygon(QPolygonF([QPointF(-9, 2), QPointF(0, -21), QPointF(9, 2)]))
-            p.setPen(QPen(INK, 3.2))
-            p.restore()
-
-    def _draw_eyes(self, p: QPainter) -> None:
-        pr = self._p
-        open_amt = max(0.0, pr["eye"] * (1.0 - self._blink))
-        gx, gy = self._gaze.x(), self._gaze.y()
-
-        for sx in (-1, 1):
-            ex = sx * 18.5
-            ey = -2.0
-            if open_amt < 0.14:
-                # closed: a contented arc
-                p.setPen(QPen(INK, 3.4, Qt.SolidLine, Qt.RoundCap))
-                p.setBrush(Qt.NoBrush)
-                path = QPainterPath(QPointF(ex - 10, ey + 1))
-                path.quadTo(QPointF(ex, ey - 8), QPointF(ex + 10, ey + 1))
-                p.drawPath(path)
-                continue
-
-            lid = pr["lid"]
-            h = 22 * min(1.25, open_amt) * (1.0 - 0.52 * lid)
-            w = 17.0
-            top = ey - h / 2 + 5.5 * lid
-
-            p.setPen(QPen(INK, 2.6))
-            p.setBrush(WHITE)
-            p.drawEllipse(QRectF(ex - w / 2, top, w, h))
-
-            p.setPen(Qt.NoPen)
-            p.setBrush(INK)
-            pr_ = 6.4 * (1.0 - 0.25 * lid)
-            p.drawEllipse(QRectF(ex - pr_ + gx, top + h / 2 - pr_ + gy * (1 - lid),
-                                 pr_ * 2, pr_ * 2))
-            p.setBrush(WHITE)
-            p.drawEllipse(QRectF(ex - 1.6 + gx + 2.2, top + h / 2 - 5.4 + gy, 4.4, 4.4))
-
-            if lid > 0.08:       # a heavy upper lid reads as sleepy at a glance
-                p.setPen(QPen(INK, 3.0, Qt.SolidLine, Qt.RoundCap))
-                p.setBrush(Qt.NoBrush)
-                p.drawLine(QPointF(ex - w / 2 - 1, top), QPointF(ex + w / 2 + 1, top))
-
-    def _draw_muzzle(self, p: QPainter) -> None:
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 120))
-        p.drawEllipse(QRectF(-17, 10, 34, 20))
-
-        # nose
-        p.setPen(QPen(INK, 2.2))
-        p.setBrush(PINK)
-        nose = QPolygonF([QPointF(-5, 13), QPointF(5, 13), QPointF(0, 19)])
-        p.drawPolygon(nose)
-
-        # mouth
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(INK, 2.4, Qt.SolidLine, Qt.RoundCap))
-        m = QPainterPath(QPointF(0, 19))
-        m.quadTo(QPointF(-6, 26), QPointF(-11, 21))
-        p.drawPath(m)
-        m2 = QPainterPath(QPointF(0, 19))
-        m2.quadTo(QPointF(6, 26), QPointF(11, 21))
-        p.drawPath(m2)
-
-        # whiskers
-        p.setPen(QPen(QColor(120, 100, 88, 190), 1.9, Qt.SolidLine, Qt.RoundCap))
-        for sx in (-1, 1):
-            for i, dy in enumerate((-3.0, 2.0, 7.0)):
-                x0 = sx * 20
-                p.drawLine(QPointF(x0, 12 + dy * 0.5),
-                           QPointF(x0 + sx * 30, 8 + dy * 1.5))
+        p.setRenderHint(QPainter.Antialiasing, True)
 
     def _draw_zzz(self, p: QPainter, t: float) -> None:
         p.setPen(Qt.NoPen)
@@ -568,6 +563,12 @@ class PetWindow(QWidget):
         self._moved_while_held = False
         self.held = False          # while true the physics leaves her alone
 
+        # mochi drag / shake, tracked purely from consecutive drag positions
+        self._drag_last_pos = None
+        self._drag_last_time = 0.0
+        self._shake_flips: list[float] = []
+        self._shake_sign = 0
+
     # ---- mouse
 
     def mousePressEvent(self, ev) -> None:
@@ -575,18 +576,52 @@ class PetWindow(QWidget):
             self._drag = ev.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self._moved_while_held = False
             self.held = True
+            self.cat.set_held(True)
+            self._drag_last_pos = ev.globalPosition().toPoint()
+            self._drag_last_time = time.time()
+            self._shake_flips = []
+            self._shake_sign = 0
             self.grabbed.emit()
         elif ev.button() == Qt.RightButton:
             self._menu(ev.globalPosition().toPoint())
 
     def mouseMoveEvent(self, ev) -> None:
         if self._drag and ev.buttons() & Qt.LeftButton:
-            self.move(ev.globalPosition().toPoint() - self._drag)
+            pos = ev.globalPosition().toPoint()
+            self.move(pos - self._drag)
             self._moved_while_held = True
+            self._track_drag_physics(pos)
+
+    def _track_drag_physics(self, pos) -> None:
+        """A held cat swings like a pendulum lagging behind your hand, and
+        wobbles if you shake her -- both read straight off consecutive drag
+        positions, no separate physics loop needed."""
+        now = time.time()
+        dt = max(1e-3, now - self._drag_last_time)
+        if self._drag_last_pos is not None:
+            dx = pos.x() - self._drag_last_pos.x()
+            # she lags behind the direction you're moving her -- the same
+            # sign convention as a pendulum bob trailing its pivot
+            vx = dx / dt
+            self.cat.set_hold_sway(max(-30.0, min(30.0, -vx / 45.0)))
+
+            if abs(dx) > 3:
+                sign = 1 if dx > 0 else -1
+                if self._shake_sign and sign != self._shake_sign:
+                    self._shake_flips.append(now)
+                self._shake_sign = sign
+            self._shake_flips = [ts for ts in self._shake_flips if now - ts < 0.6]
+            if len(self._shake_flips) >= 4:
+                self.cat.trigger_wobble()
+                self._shake_flips.clear()
+        self._drag_last_pos = pos
+        self._drag_last_time = now
 
     def mouseReleaseEvent(self, _ev) -> None:
         self._drag = None
         self.held = False
+        self.cat.set_held(False)
+        self._drag_last_pos = None
         # hand her real position back to the physics, or the next frame would
         # teleport her to wherever it still thought she was
         self.dragged.emit(float(self.x()), float(self.y()))
@@ -597,6 +632,15 @@ class PetWindow(QWidget):
         m = QMenu(self)
         m.addAction("go home", self.sent_home.emit)
         m.addAction("say something", self.cat.open_entry)
+        skins = m.addMenu("skin")
+        for name in SKINS:
+            label = name.replace("_", " ")
+            action = skins.addAction(label, lambda n=name: self.cat.set_skin(n))
+            action.setCheckable(True)
+            action.setChecked(name == self.cat.skin)
+        follow = m.addAction("follow cursor with eyes", self.cat.set_eye_follow)
+        follow.setCheckable(True)
+        follow.setChecked(self.cat.eye_follow_enabled)
         m.addSeparator()
         m.addAction("pause / wake", self.pause_toggled.emit)
         m.addAction("let miso go", self.quit_asked.emit)

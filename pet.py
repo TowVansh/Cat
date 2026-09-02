@@ -1,9 +1,11 @@
 """Miso, with a body.
 
     .venv\\Scripts\\python.exe pet.py
+    .venv\\Scripts\\python.exe pet.py --voice     also speak out loud
 
 Left-click the cat to type to it. Drag it anywhere. Right-click for the menu.
-Hold alt+v to talk out loud (it still answers in writing).
+Hold alt+v to talk to her by voice (she answers in writing unless --voice
+is passed too).
 """
 from __future__ import annotations
 
@@ -41,6 +43,16 @@ from PySide6.QtWidgets import QApplication                  # noqa: E402
 from miso import (antics, body, brain, config, face, house, needs as needs_mod,
                   only_one, reflex, senses)                         # noqa: E402
 
+# She writes by default. Pass --voice to also speak out loud -- same opt-in
+# as run.py's console mode, same "never fatal" guard around it.
+voice = None
+if "--voice" in sys.argv:
+    try:
+        from miso import voice as voice_mod
+        voice = voice_mod.Voice()
+    except Exception:
+        voice = None
+
 ACT_WORDS = {
     "look": "looking around",
     "open_it": "opening something",
@@ -70,7 +82,7 @@ def mood_antic(miso: body.Miso) -> str:
     if d.loneliness > 0.7 and d.resignation < 0.5:
         return "watch"
     if d.boredom > 0.75 and d.energy > 0.5:
-        return random.choice(["zoomies", "spin", "hop"])
+        return random.choice(["zoomies", "spin", "wander"])
     if d.curiosity > 0.65:
         return "wander"
     return random.choice(antics.IDLE_PICKS)
@@ -129,7 +141,8 @@ def main() -> int:
     bridge = Bridge()
 
     bridge.spoke.connect(lambda s: win.cat.speak(s, "say"))
-    bridge.acted.connect(lambda a: win.cat.speak(ACT_WORDS.get(a, a), "think"))
+    if voice:
+        bridge.spoke.connect(lambda s: voice.say(s))
     bridge.noted.connect(lambda n: win.cat.speak(n.strip("()"), "think"))
 
     miso = body.Miso(
@@ -145,6 +158,19 @@ def main() -> int:
     # ------------------------------------------------------------- the body
     screen = QGuiApplication.primaryScreen().availableGeometry()
     move = antics.Antics(screen, face.W, face.H)
+
+    # memory acts get a visible reaction, not just a thought bubble -- she
+    # actually perks up while writing in her journal, so the memory system
+    # (already real, already persisted to disk) is something you can see
+    # rather than something that only happens in a file
+    MEMORY_ACTS = ("write_in_journal", "carry_home")
+
+    def on_act(a: str) -> None:
+        win.cat.speak(ACT_WORDS.get(a, a), "think")
+        if a in MEMORY_ACTS and move.antic not in ("chase", "pounce", "going_home"):
+            move.start("perk")
+
+    bridge.acted.connect(on_act)
 
     # ------------------------------------------------------------ her home
     needs = needs_mod.Needs.load()
@@ -191,6 +217,8 @@ def main() -> int:
     win.dragged.connect(move.put)
     win.grabbed.connect(lambda: move.start("wiggle"))
 
+    air = {"was": False, "vy": 0.0}
+
     def frame() -> None:
         """Miso's body, sixty times a second, entirely without the model."""
         if senses.paused() or win.held or the_house.isVisible():
@@ -205,7 +233,21 @@ def main() -> int:
         win.cat.spin = move.spin
         win.cat.lean = move.lean
         win.cat._facing = move.facing
+        win.cat.ground_speed = move.vx
         win.cat.set_pose(move.pose())
+        # eyes track the cursor from anywhere on the desktop, not just when
+        # it's already over her small window (only when eye_follow_enabled)
+        win.cat.set_gaze_from_global(c.x() - (move.x + face.W / 2),
+                                     c.y() - (move.y + face.H * 0.35))
+
+        # airborne: a real jump pose instead of falling through to idle,
+        # stretched in flight, briefly squashed on a hard landing
+        airborne = move.vy != 0.0 or move.y < move.floor - 1
+        win.cat.airborne = airborne
+        win.cat.set_air_stretch(min(1.0, abs(move.vy) / 1000.0) if airborne else 0.0)
+        if air["was"] and not airborne and abs(air["vy"]) > 260:
+            win.cat.trigger_land_squash()
+        air["was"], air["vy"] = airborne, move.vy
 
     ticker = QTimer(win)
     ticker.timeout.connect(frame)
