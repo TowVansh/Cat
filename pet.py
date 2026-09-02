@@ -40,8 +40,8 @@ from PySide6.QtCore import QObject, QTimer, Signal          # noqa: E402
 from PySide6.QtGui import QCursor, QGuiApplication          # noqa: E402
 from PySide6.QtWidgets import QApplication                  # noqa: E402
 
-from miso import (antics, body, brain, config, face, house, needs as needs_mod,
-                  only_one, reflex, senses)                         # noqa: E402
+from miso import (antics, body, brain, config, face, house, meow,
+                  needs as needs_mod, only_one, senses)             # noqa: E402
 
 # She writes by default. Pass --voice to also speak out loud -- same opt-in
 # as run.py's console mode, same "never fatal" guard around it.
@@ -68,10 +68,11 @@ ACT_WORDS = {
 class Bridge(QObject):
     """The heartbeat runs on its own thread; Qt must be touched on the GUI one.
     Every crossing goes through a signal."""
-    spoke = Signal(str)
+    spoke = Signal(str, str)   # noise, and your reading of it
     acted = Signal(str)
     noted = Signal(str)
     antic = Signal(str)
+    command = Signal(str)
 
 
 def mood_antic(miso: body.Miso) -> str:
@@ -108,7 +109,7 @@ def body_only(app: QApplication, win: face.PetWindow) -> int:
     timer.start(7000)
     QTimer.singleShot(900, step)
 
-    win.said.connect(lambda t: win.cat.speak("...", "think"))
+    win.said.connect(lambda t: win.cat.mew("ignored_you"))
     win.show()
     return app.exec()
 
@@ -140,9 +141,11 @@ def main() -> int:
         return 1
     bridge = Bridge()
 
-    bridge.spoke.connect(lambda s: win.cat.speak(s, "say"))
+    bridge.spoke.connect(lambda noise, meaning: win.cat.speak(noise, "say", meaning))
     if voice:
-        bridge.spoke.connect(lambda s: voice.say(s))
+        # the speaker gets the noise, never the translation -- the English is
+        # your subtitle, not a thing she is capable of pronouncing
+        bridge.spoke.connect(lambda noise, meaning: voice.say(noise))
     bridge.noted.connect(lambda n: win.cat.speak(n.strip("()"), "think"))
 
     miso = body.Miso(
@@ -150,6 +153,7 @@ def main() -> int:
         on_act=bridge.acted.emit,
         on_note=bridge.noted.emit,
         on_antic=bridge.antic.emit,
+        on_command=bridge.command.emit,
     )
 
     win.said.connect(miso.hear)
@@ -186,7 +190,7 @@ def main() -> int:
         move.come_back()
         win.show()
         win.raise_()
-        win.cat.speak(random.choice(["back", "hm", "out again"]), "say")
+        win.cat.mew("put_down")
 
     the_house.came_back.connect(come_back)
     win.sent_home.connect(move.head_home)
@@ -209,11 +213,38 @@ def main() -> int:
                 the_house._leave()
             win.show()
             win.raise_()
-            win.cat.speak("i am here", "say")
+            win.cat.mew("greeting")
+
+    # ---------------------------------------------------- doing as she's told
+    def obey(action: str) -> None:
+        """She has decided to go along with what you pointed at. The refusing
+        happens in body.py; by the time it reaches here she has agreed."""
+        if action in ("go_eat", "go_drink", "go_home", "go_bed"):
+            move.head_home()
+        elif action == "come_here":
+            c = QCursor.pos()
+            move.go_to(c.x() - face.W / 2)
+        elif action == "play":
+            move.start("zoomies")
+        elif action == "stop":
+            move.start("shrink")
+        elif action in ("look_up", "preen"):
+            move.start("perk")
+
+    bridge.command.connect(obey)
+
+    def do_antic(name: str) -> None:
+        """Antics asked for by the heartbeat -- including her sitting squarely
+        in front of whatever you have been staring at."""
+        if name == "sit_on_screen":
+            move.sit_in_the_way()
+        else:
+            move.start(name)
+
+    bridge.antic.connect(do_antic)
 
     doorbell = only_one.Doorbell(win)
     doorbell.rang.connect(answer_door)
-    bridge.antic.connect(move.start)
     win.dragged.connect(move.put)
     win.grabbed.connect(lambda: move.start("wiggle"))
 
@@ -235,6 +266,7 @@ def main() -> int:
         win.cat._facing = move.facing
         win.cat.ground_speed = move.vx
         win.cat.set_pose(move.pose())
+        miso.busy = move.antic in ("chase", "pounce", "going_home")
         # eyes track the cursor from anywhere on the desktop, not just when
         # it's already over her small window (only when eye_follow_enabled)
         win.cat.set_gaze_from_global(c.x() - (move.x + face.W / 2),
@@ -265,7 +297,7 @@ def main() -> int:
         needs.save()
         if (needs.wants() or needs.hunger > 0.6 or needs.thirst > 0.6
                 or miso.drives.energy < 0.2):
-            win.cat.speak(random.choice(["going home", "hm", "back soon"]), "say")
+            win.cat.mew("going_home")
             move.head_home()
             return
         move.start(mood_antic(miso))
@@ -279,7 +311,8 @@ def main() -> int:
         if senses.paused() or win.held or random.random() > 0.22:
             return
         if miso.drives.energy > 0.25:
-            win.cat.speak(reflex.idle_noise(), "say")
+            noise, _ = meow.idle_noise()
+            win.cat.speak(noise, "say")
 
     muttering = QTimer(win)
     muttering.timeout.connect(mutter)
@@ -289,10 +322,10 @@ def main() -> int:
         flag = config.CODE_DIR / "PAUSE"
         if flag.exists():
             flag.unlink()
-            win.cat.speak("oh. i am back", "say")
+            win.cat.mew("greeting")
         else:
             flag.write_text("paused", encoding="utf-8")
-            win.cat.speak("going quiet", "say")
+            win.cat.mew("sleepy")
 
     win.pause_toggled.connect(toggle_pause)
 
@@ -307,7 +340,7 @@ def main() -> int:
     win.show()
     threading.Thread(target=miso.run, daemon=True).start()
 
-    QTimer.singleShot(900, lambda: win.cat.speak("oh. hello", "say"))
+    QTimer.singleShot(900, lambda: win.cat.mew("greeting"))
     QTimer.singleShot(1500, lambda: move.start("stretch"))
     return app.exec()
 

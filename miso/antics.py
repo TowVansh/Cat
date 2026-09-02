@@ -58,6 +58,11 @@ PLAYFUL_PICKS = ["zoomies", "spin", "pounce", "wander", "chase"]
 DURATIONS["going_home"] = (6.0, 14.0)
 POSE_FOR["going_home"] = "walk"
 
+# planting herself in the middle of the screen, in front of whatever you are
+# doing. Long, because being ignored is the entire point of it.
+DURATIONS["sit_on_screen"] = (20.0, 40.0)
+POSE_FOR["sit_on_screen"] = "bored"
+
 
 class Antics:
     """Miso's body in space. Owns her position, velocity, and current antic."""
@@ -205,6 +210,9 @@ class Antics:
             self._steer_to(*(self.target or (self.screen.right(), self.floor)),
                            WANDER_SPEED * 1.5, dt)
 
+        elif a == "sit_on_screen":
+            self.vx = self.vy = 0.0           # she is not going anywhere
+
         elif a == "wander":
             if self.target is None or math.dist((self.x, self.y), self.target) < 25:
                 self.start("sit")
@@ -252,6 +260,8 @@ class Antics:
     # ---- position
 
     def _integrate(self, dt: float) -> None:
+        if self.antic == "sit_on_screen":
+            return                          # she stays exactly where she sat
         in_air = self.vy != 0.0 or self.y < self.floor - 0.5
 
         if in_air:
@@ -288,6 +298,23 @@ class Antics:
 
     # ------------------------------------------------------------ reporting
 
+    def go_to(self, x: float, y: float | None = None) -> None:
+        """Walk somewhere specific, because you told her to."""
+        self.start("wander")
+        self.target = (max(float(self.screen.left()),
+                           min(float(self.screen.right() - self.w), x)),
+                       self.floor if y is None else
+                       max(self.back, min(self.floor, y)))
+
+    def sit_in_the_way(self) -> None:
+        """Park in the middle of the screen where you cannot miss her."""
+        self.start("sit_on_screen")
+        self.target = None
+        mid = self.screen.left() + (self.screen.width() - self.w) / 2
+        self.x = float(mid)
+        self.y = float(self.screen.top() + (self.screen.height() - self.h) * 0.35)
+        self.vx = self.vy = 0.0
+
     def head_home(self) -> None:
         """Set off for the right-hand edge of the screen."""
         self.start("going_home")
@@ -306,6 +333,9 @@ class Antics:
         self.start("stretch")
 
     def pose(self) -> str:
-        if self.vy != 0.0 or self.y < self.floor - 1:
+        # sitting in the way is the one time she is deliberately off the floor
+        # without having jumped there, so it must not read as mid-air
+        if self.antic != "sit_on_screen" and (self.vy != 0.0
+                                              or self.y < self.floor - 1):
             return "happy"                               # mid-air
         return POSE_FOR.get(self.antic, "idle")

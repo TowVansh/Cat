@@ -92,11 +92,12 @@ class Needs:
         return None
 
     def complaining(self) -> str | None:
-        """Something to say when a bowl is empty and she needs it."""
+        """The intent she would voice about an empty bowl, for `meow.say`.
+        An intent rather than a sentence -- she has no English."""
         if self.thirst > 0.7 and self.water_bowl <= 0.02:
-            return "the water is gone"
+            return "thirsty"
         if self.hunger > 0.7 and self.food_bowl <= 0.02:
-            return "my bowl is empty"
+            return "bowl_empty"
         return None
 
     def feelings(self) -> str:

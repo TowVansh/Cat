@@ -47,7 +47,7 @@ class House(QWidget):
         self.showFullScreen()
         self.raise_()
         self.activateWindow()
-        self.room.cat.speak("home", "say")
+        self.room.cat.mew("arrived_home")
 
     def _leave(self) -> None:
         self.hide()

@@ -1,17 +1,23 @@
 """The heartbeat.
 
 This is the difference between a pet and a chatbot: the loop runs whether or
-not anyone is talking. Most beats cost nothing -- the model is only woken when
-a drive is actually loud enough to want something.
+not anyone is talking, and nothing in it is a reply.
+
+The model is down to one job -- writing her diary while she sleeps. Everything
+she does awake is decided in code (`doings.py`), everything she says is cat
+noise (`meow.py`), and anything you type is a thing pointed at rather than a
+question asked (`commands.py`). She is allowed to ignore you.
 """
 from __future__ import annotations
 
 import queue
+import random
 import threading
 import time
 from datetime import date
 
-from . import brain, config, drives as drives_mod, eyes, memory, mind, reflex, senses
+from . import (brain, commands, config, doings, drives as drives_mod, eyes,
+               meow, memory, mind, senses, watching)
 
 TICK_SECONDS = 30
 MIN_GAP_BETWEEN_ACTS = 150      # seconds of quiet between unprompted moments
@@ -20,29 +26,26 @@ MAX_TURNS_PER_HOUR = 24         # hard ceiling, cannot spiral
 MIN_GAP_BETWEEN_VISION = 1200   # 20 minutes -- a glance is far heavier than a turn
 MAX_VISION_PER_HOUR = 3         # its own, tighter ceiling
 
-OCCASIONS = {
-    "explore": "nobody is about. you want to go and look at something. pick a "
-               "direction and actually go -- look, and if you find a thing, open it. "
-               "if you learn something worth keeping, put it in your map.",
-    "potter": "you are in your home with nothing to do. tidy something, make "
-              "something, write something down, or move an old thing to compost.",
-    "find_you": "they are here. you want them to notice you. say something small. "
-                "do not ask them if they need anything.",
-    "rest": "you are tired. settle somewhere. maybe say one sleepy thing, maybe not.",
-    "sleep": "you are asleep.",
-    "idle": "nothing in particular. you are just here.",
-    "look_at_screen": "you glance at whatever is open on the screen in front of you.",
+# what an urge makes her say, when it makes her say anything at all
+URGE_INTENT = {
+    "find_you": "want_attention",
+    "rest": "sleepy",
+    "sleep": "sleepy",
 }
 
 
 class Miso:
-    def __init__(self, on_speak=None, on_act=None, on_note=None, on_antic=None):
+    def __init__(self, on_speak=None, on_act=None, on_note=None, on_antic=None,
+                 on_command=None):
         self.drives = drives_mod.Drives.load()
+        self.watcher = watching.Watcher.load()
         self.inbox: queue.Queue[str] = queue.Queue()
-        self.on_speak = on_speak or (lambda s: None)
+        self.on_speak = on_speak or (lambda noise, meaning: None)
         self.on_act = on_act or (lambda a: None)
         self.on_note = on_note or (lambda n: None)
         self.on_antic = on_antic or (lambda a: None)
+        self.on_command = on_command or (lambda a: None)
+        self.busy = False           # set by the body: mid-chase, mid-pounce
         self._stop = threading.Event()
         self._last_act = 0.0
         self._turn_times: list[float] = []
@@ -77,28 +80,33 @@ class Miso:
 
     # ---------------------------------------------------------------- life
 
-    def _answer(self, heard: str) -> None:
-        """Someone spoke. React now, think after.
+    def say(self, intent: str) -> None:
+        """Make a noise that means something. The only way she speaks."""
+        noise, meaning = meow.say(intent)
+        self.on_speak(noise, meaning)
+        if meaning:
+            memory.remember("said", meaning)
 
-        The reflex is instant and free. The spoken reply comes from the fast,
-        tool-free path, which lands in well under a second. Miso is allowed to
-        be wrong; she is not allowed to be slow.
+    def _answer(self, heard: str) -> None:
+        """You pointed at something. She decides whether she cares.
+
+        No model and no reply -- she is not answering a question, she is being
+        told about her own world. Half the point is that she can decline.
         """
         self.drives.saw_you()
         self.drives.tick()
-        self._asleep_until = 0.0             # being spoken to wakes a cat
-
-        line, antic, wants_words = reflex.react(heard)
-        self.on_antic(antic)
-        if line:
-            self.on_speak(line)
+        self._asleep_until = 0.0             # being told something wakes a cat
         memory.remember("heard", heard)
 
-        if wants_words:
-            reply = mind.chat(self.drives, heard)
-            if reply:
-                self.on_speak(reply)
-                memory.remember("said", reply)
+        command = commands.understand(heard)
+        if command is None or not commands.will_she(command, self.drives,
+                                                    busy=self.busy):
+            self.say("ignored_you")
+            self._spend_turn()
+            return
+
+        self.on_command(command.action)
+        self.say(command.intent)
         self.drives.satisfy(loneliness=-0.25, boredom=-0.15)
         self._spend_turn()
 
@@ -132,28 +140,52 @@ class Miso:
         self.drives.satisfy(curiosity=-0.20)
         return f"you glance at the screen. it says: {title}\n\nwhat's on it: {description}"
 
-    def _act(self, occasion_key: str, heard: str | None = None) -> None:
-        if occasion_key == "look_at_screen":
-            occasion = self._glance() or OCCASIONS["explore"]
-        else:
-            occasion = OCCASIONS.get(occasion_key, OCCASIONS["idle"])
-        # whatever Miso is doing on its own stops the moment you say something
-        stop_for_you = None if heard else (lambda: not self.inbox.empty())
-        try:
-            out = mind.turn(self.drives, occasion, heard, interrupted=stop_for_you)
-        except brain.BrainOffline as exc:
-            self.on_note(f"(brain unreachable: {exc})")
-            time.sleep(20)
-            return
+    def _act(self, urge: str) -> None:
+        """Do the thing the urge wants. All code, no model.
 
-        for line in out["speech"]:
-            self.on_speak(line)
-        for act in out["acts"]:
-            self.on_act(act)
-        if out["napped"]:
-            self._asleep_until = time.time() + out["napped"] * 60
-            self.on_note(f"(curled up for {out['napped']} minutes)")
+        Each branch already writes its own episodes through `memory`, so the
+        diary still has something to be written from tonight -- the model just
+        is not the thing choosing any more.
+        """
+        intent = None
+
+        if urge == "look_at_screen":
+            intent = "curious" if self._glance() else None
+        elif urge == "explore":
+            intent = doings.explore()
+            self.drives.satisfy(curiosity=-0.35, boredom=-0.25)
+            self.drives.spend(0.03)
+        elif urge == "potter":
+            intent = doings.potter()
+            self.drives.satisfy(boredom=-0.35)
+            self.drives.spend(0.02)
+        elif urge == "rest":
+            intent = doings.look_at_own_things() or "sleepy"
+        else:
+            intent = URGE_INTENT.get(urge)
+
+        self.on_act(urge)
+        if intent and random.random() < 0.7:      # not every act is announced
+            self.say(intent)
         self._spend_turn()
+
+    def _nag(self) -> None:
+        """She has had enough of whatever you have been staring at."""
+        step = self.watcher.next_step()
+        if step is None:
+            return
+        if step == "complain":
+            self.say("get_off_that")
+            self.on_antic("watch")
+        elif step == "sit_on_it":
+            self.say("want_play")
+            self.on_antic("sit_on_screen")
+        elif step == "minimize":
+            if self.watcher.put_it_away():
+                self.say("want_play")
+                self.on_antic("wiggle")
+                self.drives.satisfy(boredom=-0.3)
+        self.watcher.save()
 
     def _dream(self) -> None:
         """Once a night: fold the day into the slow memory. This is the part
@@ -217,6 +249,15 @@ class Miso:
 
             self.drives.tick()
 
+            # she keeps half an eye on what you have been sat in front of
+            self.watcher.tick()
+            if self.watcher.fed_up(self.drives):
+                self._nag()
+                self.drives.save()
+                self._stop.wait(TICK_SECONDS)
+                continue
+            self.watcher.save()
+
             if time.time() < self._asleep_until:
                 self.drives.save()
                 self._stop.wait(TICK_SECONDS)
@@ -232,7 +273,7 @@ class Miso:
                 continue
 
             quiet_enough = time.time() - self._last_act > MIN_GAP_BETWEEN_ACTS
-            if urge in ("idle", "rest") or not quiet_enough or not self._rate_ok():
+            if urge == "idle" or not quiet_enough or not self._rate_ok():
                 self.drives.save()
                 self._stop.wait(TICK_SECONDS)
                 continue

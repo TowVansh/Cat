@@ -26,9 +26,12 @@ prompt.
 | `drives.py` | `Drives` dataclass — curiosity, boredom, loneliness, energy, resignation. Ticks based on real elapsed time, asymptotic approach to ceiling, persists to `state/drives.json`. Plain, standalone, no LLM dependency. |
 | `needs.py` | Same pattern as `drives.py`, for hunger/thirst — drives her home when unmet. |
 | `memory.py` | `remember(kind, text)` — `kind` is `said | heard | saw | did | felt`. Appends JSONL to `/home/memories/`, journal to `/home/journal/`, rewrites `/home/who-i-am.md` and `/home/map-of-the-world.md` only during the nightly dream. Everything here routes through `jail.*`. |
-| `mind.py` | The turn loop. `turn(drives, occasion, heard, interrupted)` builds a prompt (`system_prompt()`), calls the model with tools, dispatches tool calls via `_perform()`, returns `{"speech": [...], "acts": [...], "napped": int}`. `occasion` is a plain opaque string — the general-purpose hook for injecting situational context into a turn (see eyes.py's usage). `chat()` is a separate, faster, tool-free path for instant replies. |
+| `mind.py` | **Reduced to `PERSONA` only** — the voice her nightly diary is written in. The turn loop, the nine tools and the conversational `chat()` path are all gone; `body._dream()` is the only caller left. |
+| `meow.py` | Everything she says. `say(intent)` -> `(noise, translation)`. The noise is synthesised from the meaning, not stored beside it. `MEANINGS` is the phrase bank; `VOICES` is the syllable palette per mood. No model. |
+| `commands.py` | The text box. `understand(text)` -> `Command | None`, then `will_she(command, drives, busy)` — an obedience roll she is allowed to fail. Pure regex. |
+| `doings.py` | What she does awake: explore, potter, re-read her own journal. Plain code against `jail`, replacing what the model's tool calls used to decide. |
+| `watching.py` | Foreground-window titles only (no capture). Tracks how long you have sat on one thing; escalates complain -> sit on it -> **minimize**. `ShowWindow` appears exactly once and there is no close path at all. |
 | `brain.py` | Stdlib-only Ollama client. `think()`/`small_think()` for the text model (`MODEL = "qwen3:8b"`), `see()` for the vision model (`VISION_MODEL = "moondream"`, added this session). No client library, no network past localhost. |
-| `reflex.py` | Instant, model-free pattern-matched reactions to what's heard (`<1ms`). Fires before any model call. |
 | `body.py` | The heartbeat (`Miso.run()`, its own thread). Ticks drives, computes an `urge`, rate-limits and dispatches turns via `_act()`. `OCCASIONS` dict maps urge → prompt string. This is where new autonomous behaviors get wired in (see `_glance()`/`look_at_screen` for the pattern). |
 | `senses.py` | Idle time, "is someone there," the `PAUSE` kill-switch, time of day. All Windows-specific calls wrapped in `try/except (AttributeError, OSError): return <safe default>` — the template every other OS-specific module follows. |
 | `eyes.py` | **New this session.** Screen vision — see "Screen vision" below. |
@@ -193,23 +196,36 @@ the result.
 ## Testing
 
 ```
-python3 test_jail.py    # 57 checks, the safety sandbox
-python3 test_mind.py    # 10 checks, the turn loop with a scripted fake model
-python3 test_eyes.py    # 21 checks, vision — wall heuristic, brain.see()'s
-                         # payload shape, rate limiting, _glance() end to end,
-                         # everything faked (no Windows/Ollama needed)
+python3 test_jail.py    # 58 checks, the safety sandbox
+python3 test_pet.py     # 78 checks, that she stays a pet: meow never leaks
+                         #   English, commands map, she can refuse, the nag
+                         #   escalates in order and can only minimize
+python3 test_eyes.py    # 21 checks, vision
 ```
+
+**`test_support.scratch_home()` must be called before any test touches `jail`
+or `memory`.** Without it the suites write into the real cat's diary — that is
+not hypothetical, it happened: lines like `hello from a string` and a fake
+`GitHub - some/repo` glance were found sitting in her actual memories, on
+course to be folded into her self-summary by the nightly dream as though they
+had happened to her.
 
 All three run and pass on macOS with no Ollama and no display — they're
 designed to, following `test_jail.py`'s original pattern of a plain
 `check(label, cond)` counter and monkeypatched fakes rather than a test
 framework or a mocking library.
 
-**What can't be verified without the user's real Windows machine + Ollama +
-a pulled vision model**: actual screen-capture pixel correctness, real
-vision-model description quality/latency, model-swap behavior when Ollama
-juggles `qwen3:8b` and the vision model, and whether the full app (`pet.py`)
-actually runs end to end — this whole session worked from a macOS sandbox
+**Verified since, on the real Windows machine**: `foreground_window()` returns
+a real `(hwnd, title)`; `capture_foreground()` produces a valid 45KB PNG (it
+needed Pillow, which was missing — and because every optional import here
+degrades silently, vision was simply dead with no error, which is exactly the
+failure mode that missing `requirements.txt` invites); `minimize()` genuinely
+minimizes and leaves the window alive; `pet.py` runs end to end. The
+`test_eyes.py` assertion that `foreground_window()` returns `None` was true
+only off Windows and is now platform-branched.
+
+**Still unverified**: real vision-model description quality/latency, and
+model-swap behavior when Ollama juggles `qwen3:8b` and `moondream` — this whole session worked from a macOS sandbox
 with no Ollama installed, verifying everything else (rendering, physics,
 turn-loop logic, safety) through direct widget rendering, `py_compile`, and
 the test suites above.
@@ -221,8 +237,7 @@ Every Windows-only call is wrapped in the `try/except (AttributeError,
 OSError): return <safe default>` pattern established in `senses.py` — this
 is why the whole thing imports and runs cleanly on macOS/Linux for
 development, even though it doesn't *do* anything platform-specific there.
-There's still no `requirements.txt`/`pyproject.toml` in this repo — every
-dependency (PySide6, keyboard, numpy, sounddevice, faster_whisper,
-kokoro_onnx, Pillow) is an unlisted import. Adding one more is normal
-practice here, not a new category of change, but a real gap worth closing
-eventually.
+`requirements.txt` now exists. It matters more here than in most repos
+precisely because every dependency is an optional import that degrades to
+silence: a missing package does not raise, it just makes a feature quietly
+never happen.

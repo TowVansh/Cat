@@ -161,7 +161,8 @@ class Cat(QWidget):
         # speech
         self._line = ""
         self._kind = "say"          # say | think
-        self._queue: list[tuple[str, str]] = []
+        self._meaning = ""          # the bracketed reading of the noise
+        self._queue: list[tuple[str, str, str]] = []
         self._shown = 0.0
         self._said_at = 0.0
         self._bubble_w = 0.0
@@ -243,10 +244,15 @@ class Cat(QWidget):
         """A hard landing: brief squash, decaying on its own."""
         self._land_squash_until = time.time() + 0.22
 
-    def speak(self, text: str, kind: str = "say") -> None:
+    def speak(self, text: str, kind: str = "say", meaning: str = "") -> None:
         """Queue a line. Lines wait their turn instead of replacing each other --
         a reply followed immediately by 'looking around' would otherwise wipe the
-        reply in the same frame, and it would look like Miso never answered."""
+        reply in the same frame, and it would look like Miso never answered.
+
+        `text` is what she actually makes: cat noise. `meaning` is your reading
+        of it, drawn smaller and bracketed above. She is not saying the English;
+        you are supplying it.
+        """
         text = text.strip()
         if not text:
             return
@@ -256,18 +262,26 @@ class Cat(QWidget):
             self._queue = [q for q in self._queue if q[1] == "say"]
             if self._line and self._kind == "think":
                 self._line = ""
-        self._queue.append((text, kind))
+        self._queue.append((text, kind, meaning.strip()))
         if not self._line:
             self._next_line()
 
     def _next_line(self) -> None:
         if not self._queue:
             return
-        text, kind = self._queue.pop(0)
+        text, kind, meaning = self._queue.pop(0)
         self._line = text
         self._kind = kind
+        self._meaning = meaning
         self._shown = 0.0
         self._said_at = time.time()
+
+    def mew(self, intent: str) -> None:
+        """Say something as a cat. The only speech path any caller should use --
+        anything else risks putting English in her mouth."""
+        from . import meow
+        noise, meaning = meow.say(intent)
+        self.speak(noise, "say", meaning)
 
     def open_entry(self) -> None:
         self.entry.show()
@@ -341,7 +355,18 @@ class Cat(QWidget):
         fm = QFontMetrics(font)
         rect = fm.boundingRect(QRectF(0, 0, W - 54, 400).toRect(),
                                int(Qt.TextWordWrap), shown or " ")
-        return rect.width(), rect.height()
+        w, h = rect.width(), rect.height()
+
+        # the bracketed meaning sits above the noise, so it is part of the box
+        if self._meaning:
+            small = QFont("Segoe UI", 9)
+            small.setItalic(True)
+            srect = QFontMetrics(small).boundingRect(
+                QRectF(0, 0, W - 54, 400).toRect(),
+                int(Qt.TextWordWrap), f"({self._meaning})")
+            w = max(w, srect.width())
+            h += srect.height() + 5
+        return w, h
 
     def settle(self, frames: int = 40) -> None:
         """Run the easing forward without waiting -- used when rendering stills."""
@@ -532,8 +557,24 @@ class Cat(QWidget):
                    else QColor(250, 248, 244, 214))
         p.drawPath(body.simplified())
 
+        text_y = by + 11
+        if self._meaning:
+            # your reading of the noise, above it and quieter -- it is a
+            # subtitle, not something she said
+            small = QFont("Segoe UI", 9)
+            small.setItalic(True)
+            p.setFont(small)
+            sh = QFontMetrics(small).boundingRect(
+                QRectF(0, 0, bw - 30, 400).toRect(),
+                int(Qt.TextWordWrap), f"({self._meaning})").height()
+            p.setPen(QColor(120, 106, 96, 210))
+            p.drawText(QRectF(bx + 15, text_y, bw - 30, sh),
+                       int(Qt.TextWordWrap), f"({self._meaning})")
+            text_y += sh + 5
+            p.setFont(font)
+
         p.setPen(BUBBLE_TEXT if self._kind == "say" else THOUGHT_TEXT)
-        p.drawText(QRectF(bx + 15, by + 11, bw - 30, bh - 22),
+        p.drawText(QRectF(bx + 15, text_y, bw - 30, by + bh - 11 - text_y),
                    int(Qt.TextWordWrap), shown)
         p.restore()
 

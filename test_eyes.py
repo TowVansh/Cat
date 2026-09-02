@@ -6,8 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from miso import body, brain, config, drives as drives_mod, eyes, memory
+from test_support import scratch_home
 
-config.HOME_REAL.mkdir(parents=True, exist_ok=True)
+scratch_home()          # never write into the real cat's home
 memory.birth()
 
 passed = failed = 0
@@ -35,9 +36,26 @@ check("emptying the keyword set actually removes the restriction",
       not eyes.is_walled_title("Chase Bank - online banking"))
 config.WALLED_WINDOW_KEYWORDS = _orig_keywords
 
-print("\n-- graceful fallback off Windows --")
-check("foreground_window() returns None, not an exception", eyes.foreground_window() is None)
-check("capture_foreground() returns None, not an exception", eyes.capture_foreground() is None)
+print("\n-- looking at the screen --")
+# On Windows these do real work; everywhere else they must degrade to None
+# rather than raise. Asserting None unconditionally passes only on the machine
+# the capability cannot run on, which is the one place it proves nothing.
+if sys.platform == "win32":
+    _fg = eyes.foreground_window()
+    check("foreground_window() finds the front window",
+          _fg is None or (isinstance(_fg, tuple) and len(_fg) == 2
+                          and isinstance(_fg[1], str)))
+    _shot = eyes.capture_foreground()
+    check("capture_foreground() returns PNG bytes or None",
+          _shot is None or (isinstance(_shot, bytes)
+                            and _shot[:8] == b"\x89PNG\r\n\x1a\n"))
+    if _shot is None and _fg is not None and not eyes.is_walled_title(_fg[1]):
+        print("        (note: no capture -- is Pillow installed?)")
+else:
+    check("foreground_window() degrades to None off Windows",
+          eyes.foreground_window() is None)
+    check("capture_foreground() degrades to None off Windows",
+          eyes.capture_foreground() is None)
 
 print("\n-- brain.see() builds the right payload --")
 captured = {}

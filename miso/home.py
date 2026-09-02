@@ -163,7 +163,7 @@ class Room(QWidget):
         """What she does in here. Needs come first, then boredom, then rest."""
         if self.busy_with == "eat":
             if not self.needs.eat(dt) or self.needs.hunger < 0.08:
-                self._done_with("that was good" if self.needs.hunger < 0.2 else None)
+                self._done_with("fed" if self.needs.hunger < 0.2 else None)
             return
         if self.busy_with == "drink":
             if not self.needs.drink(dt) or self.needs.thirst < 0.08:
@@ -200,7 +200,7 @@ class Room(QWidget):
         else:
             complaint = self.needs.complaining()
             if complaint and random.random() < 0.35:
-                self.cat.speak(complaint, "say")
+                self.cat.mew(complaint)
             self.cx = min(0.9, max(0.12, self.cx + random.uniform(-0.16, 0.16)))
             self.cy = min(0.95, max(0.56, self.cy + random.uniform(-0.05, 0.05)))
             self.until = now + random.uniform(2.5, 6.0)
@@ -230,16 +230,16 @@ class Room(QWidget):
             self.cat.set_pose("happy")
             self.drives.satisfy(boredom=-0.4)
             self.until = time.time() + random.uniform(5, 12)
-            self.cat.speak(random.choice(["!", "mrrp", "got it", "hup"]), "say")
+            self.cat.mew("pleased")
         else:
             self.until = time.time() + 2
 
-    def _done_with(self, line: str | None) -> None:
+    def _done_with(self, intent: str | None) -> None:
         self.busy_with = None
         self.until = time.time() + random.uniform(2, 5)
         self.needs.save()
-        if line:
-            self.cat.speak(line, "say")
+        if intent:
+            self.cat.mew(intent)
 
     # --------------------------------------------------------------- mouse
 
@@ -288,7 +288,7 @@ class Room(QWidget):
             self.needs.fill_food()
         self.needs.save()
         self.fed.emit(which)
-        self.cat.speak(random.choice(["!!", "oh!", "mrrp", "yes"]), "say")
+        self.cat.mew("fed")
         self._go_to(which, "drink" if which == "water" else "eat")
 
     # ------------------------------------------------------------ painting

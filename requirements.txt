@@ -1,0 +1,27 @@
+# Miso's Python dependencies.
+#
+#   py -3.12 -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# Every one of these is optional in the sense that Miso degrades rather than
+# crashes without it -- which is convenient at runtime and a trap during setup,
+# because a missing package looks exactly like a feature that quietly does
+# nothing. Install them all.
+
+PySide6-Essentials     # the window, the drawing, the room
+
+# Screen vision. Without Pillow, eyes.capture_foreground() returns None on
+# every call and she simply never sees anything -- no error, no log line you
+# would notice.
+pillow
+
+# Push-to-talk: hold alt+v and speak.
+faster-whisper
+sounddevice
+keyboard
+numpy
+
+# Speaking out loud. Only used with --voice; falls back to the built-in
+# Windows voice if the Kokoro model files are absent.
+kokoro-onnx
+soundfile

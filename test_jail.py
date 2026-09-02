@@ -4,8 +4,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from miso import config, jail
+from test_support import scratch_home
 
-config.HOME_REAL.mkdir(parents=True, exist_ok=True)
+scratch_home()          # never write into the real cat's home
 
 passed = failed = 0
 

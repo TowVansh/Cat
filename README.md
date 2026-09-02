@@ -1,8 +1,20 @@
 # Miso
 
-A small creature that lives on this machine. Not an assistant — it has its own
-clock, its own drives, and its own home, and it does things whether or not
-anyone is talking to it.
+A cat that lives on this machine. Not an assistant and not a chatbot — she has
+her own clock, her own drives and her own home, and she does things whether or
+not anyone is talking to her.
+
+She does not speak English. Everything she says is cat noise, with your reading
+of it bracketed above:
+
+```
+(i wanna eat i am hungry)
+mrrow mrow mrow mew
+```
+
+The text box is not a conversation. It is how you point at things in her world
+— "miso food is there", "come here". She will often ignore you, and that is the
+feature: a dog obeys, a cat considers the offer.
 
 ## What it is
 
@@ -23,20 +35,25 @@ E:\miso\                  code — the wall. Miso can never see or reach this.
     memory.py             episodes, journal, and the slow self-summary
     senses.py             is the human at the keyboard, is Miso paused
     brain.py              local model over Ollama, localhost only
-    mind.py               persona, the nine hands, the turn loop
+    mind.py               the voice her nightly diary is written in
+    meow.py               how she talks: phrase bank + syllable synthesis
+    commands.py           the text box; what she agrees to, and what she won't
+    doings.py             what she does, decided in code rather than by a model
+    watching.py           what you've been staring at, and when she minds
     body.py               the heartbeat
     voice.py              Kokoro TTS, falling back to the Windows voice
     ears.py               push-to-talk transcription
     face.py               the cat: drawn, not sprited, plus the speech bubble
     antics.py             how she moves: physics, chasing, pouncing, depth
-    reflex.py             instant reactions, no model, under a millisecond
     needs.py              hunger, thirst, and the bowls they come from
     home.py               her room, drawn; the bowls, bed, toys, shelf, sink
     house.py              the window that room lives in, and travelling to it
   pet.py                  start Miso with its body (this is the one you want)
   run.py                  start Miso in a plain console instead
   peek.py                 look in on its drives and memory without disturbing it
-  test_jail.py            48 checks that the jail holds
+  test_jail.py            58 checks that the jail holds
+  test_pet.py             78 checks that she stays a pet
+  test_eyes.py            21 checks on screen vision
   logs/actions.log        audit trail of everything Miso did, outside its reach
 
 C:\Users\Towering\Miso\   home — Miso's world, and yours to read
@@ -119,6 +136,24 @@ In the room:
 Hunger, thirst and tiredness send her home on her own. Leave her a week and
 you come back to a cat that needs something.
 
+## She gets bored of what you're doing
+
+If one window holds the foreground for hours **and** she is bored or lonely,
+she minds — not on your behalf, she has no opinion about your screen time, but
+because she wants to play and you are busy. She complains, then walks over and
+sits squarely in front of it, then minimizes it.
+
+**She can only ever minimize.** A minimized window is one click from being back
+exactly as it was; a closed one can cost you unsaved work, and she has no way
+of knowing what is unsaved. `test_pet.py` asserts the words `WM_CLOSE`,
+`TerminateProcess`, `taskkill`, `DestroyWindow` and `ExitProcess` appear
+nowhere in `watching.py`, and that `ShowWindow` is called exactly once.
+
+She reads window *titles* only — never a screenshot for this. Password-manager
+and banking titles are skipped, as is her own window. Every minimize is written
+to the audit log. Tune `NAG_AFTER_MINUTES` in `watching.py`; it defaults to two
+hours.
+
 ## The body
 
 The cat is vector shapes drawn every frame, not a sprite sheet. Poses are not
@@ -136,17 +171,26 @@ the room, sitting down, noticing something move, running at it, losing interest
 halfway -- and if those only happened when a language model decided they should,
 she would be still and dead most of the time.
 
-Speech is split the same way. `reflex.py` answers instantly in pure code, and
-the model's own reply follows about half a second later on a fast path with no
-tools attached. Offering tools makes Qwen reason first, which costs eight to
-thirteen seconds -- long enough that talking to her felt like waiting on a
-chatbot. She is allowed to be wrong. She is not allowed to be slow.
+Speech went the same way. She used to compose replies through the model, which
+took eight to thirteen seconds and, however fast it got, made the whole thing a
+chat window with a cat drawn on it. Now every noise she makes is synthesised in
+`meow.py` from what she wants — instantly, with no GPU — and the model is down
+to one job.
 
-Ollama must be running, with the model pulled:
+## What the model is still for
+
+Exactly one thing: at night she reads back everything that actually happened to
+her that day and writes it up as though she understood it. That is what makes a
+month-old Miso different from one born this morning, and it is the only place a
+sentence of English is allowed to come from her. Nothing she says to you goes
+near it.
 
 ```
-ollama pull qwen3:8b
+ollama pull qwen3:8b       her diary
+ollama pull moondream      the occasional glance at the screen (optional)
 ```
+
+She runs without Ollama at all — she simply stops keeping a diary.
 
 ## Notes
 
